@@ -1,0 +1,148 @@
+// KhanhOS AI — Prisma Schema
+// Sandbox uses SQLite (no external DB needed). For Vercel/PostgreSQL:
+//   1. Change `provider = "sqlite"` to `provider = "postgresql"`
+//   2. Set DATABASE_URL to your Postgres connection string
+//   3. Run: bun run db:push
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  phone        String?
+  role         String   @default("USER")
+  plan         String   @default("FREE")
+  tokenLimit   Int      @default(20000)
+  tokenUsed    Int      @default(0)
+  bannedAt     DateTime?
+  approved     Boolean  @default(false)
+  approvedAt   DateTime?
+  approvedBy   String?
+  settingsJson String   @default("{}")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  conversations    Conversation[]
+  usageRecords     Usage[]
+  auditLogsActor   AuditLog[]    @relation("AuditLogActor")
+  auditLogsTarget  AuditLog[]    @relation("AuditLogTarget")
+  payments         Payment[]
+  resetTokens      PasswordResetToken[]
+
+  @@index([email])
+  @@index([role])
+  @@index([plan])
+  @@index([approved])
+}
+
+model Conversation {
+  id        String    @id @default(cuid())
+  userId    String
+  title     String    @default("New Chat")
+  pinned    Boolean   @default(false)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages Message[]
+
+  @@index([userId])
+  @@index([updatedAt])
+}
+
+model Message {
+  id             String   @id @default(cuid())
+  conversationId String
+  role           String
+  content        String
+  inputTokens    Int      @default(0)
+  outputTokens   Int      @default(0)
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
+  @@index([createdAt])
+}
+
+model Usage {
+  id            String   @id @default(cuid())
+  userId        String
+  model         String
+  inputTokens   Int
+  outputTokens  Int
+  totalTokens   Int
+  createdAt     DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model AuditLog {
+  id            String   @id @default(cuid())
+  actorUserId   String
+  action        String
+  detail        String
+  metadataJson  String   @default("{}")
+  targetUserId  String?
+  createdAt     DateTime @default(now())
+
+  actor  User?  @relation("AuditLogActor", fields: [actorUserId], references: [id])
+  target User?  @relation("AuditLogTarget", fields: [targetUserId], references: [id])
+
+  @@index([actorUserId])
+  @@index([targetUserId])
+  @@index([createdAt])
+}
+
+model Payment {
+  id          String   @id @default(cuid())
+  userId      String
+  plan        String
+  amount      Int
+  status      String   @default("PENDING")
+  memo        String
+  txnRef      String?
+  approvedAt  DateTime?
+  approvedBy  String?
+  rejectedAt  DateTime?
+  rejectedBy  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model SystemSetting {
+  id    String @id
+  value String
+  updatedAt DateTime @updatedAt
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
