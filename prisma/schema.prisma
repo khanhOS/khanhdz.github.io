@@ -1,6 +1,6 @@
 // KhanhOS AI — Prisma Schema
 // Sandbox uses SQLite (no external DB needed). For Vercel/PostgreSQL:
-//   1. Change `provider = "sqlite"` to `provider = "postgresql"`
+//   1. Change `provider = "postgresql"` to `provider = "postgresql"`
 //   2. Set DATABASE_URL to your Postgres connection string
 //   3. Run: bun run db:push
 
@@ -9,7 +9,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
