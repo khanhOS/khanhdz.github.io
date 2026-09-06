@@ -1,11 +1,14 @@
-// KhanhOS AI — Cerebras API client (SERVER-ONLY)
-// The API key NEVER leaves this file's call path.
+// KhanhOS AI — Gemini API client (SERVER-ONLY)
+// API key NEVER leaves the server.
+//
+// NOTE:
+// File này giữ nguyên tên/export cũ để /api/chat không cần
+// thay đổi toàn bộ code gọi provider.
 
-const CEREBRAS_BASE_URL = 'https://api.cerebras.ai/v1'
+const GEMINI_BASE_URL =
+  'https://generativelanguage.googleapis.com/v1beta'
 
-// Model mặc định.
-// Có thể ghi đè bằng biến môi trường CEREBRAS_MODEL trên Vercel.
-const DEFAULT_CEREBRAS_MODEL = 'gpt-oss-120b'
+const DEFAULT_GEMINI_MODEL = 'gemini-3.7-flash'
 
 export interface CerebrasMessage {
   role: 'system' | 'user' | 'assistant'
@@ -29,16 +32,18 @@ export class CerebrasError extends Error {
   }
 }
 
+/**
+ * Gemini API key.
+ *
+ * Set this on Vercel:
+ * GEMINI_API_KEY=...
+ */
 function getApiKey(): string {
-  const key = process.env.CEREBRAS_API_KEY
+  const key = process.env.GEMINI_API_KEY?.trim()
 
-  if (
-    !key ||
-    key.startsWith('csk-xxx') ||
-    key.length < 10
-  ) {
+  if (!key || key.length < 10) {
     throw new CerebrasError(
-      'Cerebras API key not configured. Set CEREBRAS_API_KEY in .env',
+      'Gemini API key not configured. Set GEMINI_API_KEY in Vercel Environment Variables.',
       503
     )
   }
@@ -46,79 +51,212 @@ function getApiKey(): string {
   return key
 }
 
+/**
+ * Gemini model.
+ *
+ * Optional Vercel environment variable:
+ * GEMINI_MODEL
+ *
+ * Default:
+ * gemini-3.7-flash
+ */
 export function getCerebrasModel(): string {
-  const configuredModel = process.env.CEREBRAS_MODEL?.trim()
-
-  return configuredModel || DEFAULT_CEREBRAS_MODEL
+  return (
+    process.env.GEMINI_MODEL?.trim() ||
+    DEFAULT_GEMINI_MODEL
+  )
 }
 
+/**
+ * Convert our internal message format to Gemini format.
+ *
+ * Gemini:
+ * user      -> user
+ * assistant -> model
+ *
+ * system messages are handled separately as systemInstruction.
+ */
+function convertMessages(
+  messages: CerebrasMessage[]
+): {
+  systemInstruction?: {
+    parts: Array<{ text: string }>
+  }
+  contents: Array<{
+    role: 'user' | 'model'
+    parts: Array<{ text: string }>
+  }>
+} {
+  const systemMessages = messages.filter(
+    (message) => message.role === 'system'
+  )
+
+  const normalMessages = messages.filter(
+    (message) => message.role !== 'system'
+  )
+
+  const contents = normalMessages.map((message) => ({
+    role:
+      message.role === 'assistant'
+        ? ('model' as const)
+        : ('user' as const),
+
+    parts: [
+      {
+        text: message.content,
+      },
+    ],
+  }))
+
+  const systemText = systemMessages
+    .map((message) => message.content)
+    .join('\n\n')
+    .trim()
+
+  return {
+    ...(systemText
+      ? {
+          systemInstruction: {
+            parts: [
+              {
+                text: systemText,
+              },
+            ],
+          },
+        }
+      : {}),
+
+    contents,
+  }
+}
+
+/**
+ * Parse Gemini usage metadata.
+ */
+function readUsage(json: any): {
+  inputTokens: number
+  outputTokens: number
+} {
+  const usage = json?.usageMetadata
+
+  return {
+    inputTokens:
+      usage?.promptTokenCount ??
+      usage?.inputTokenCount ??
+      0,
+
+    outputTokens:
+      usage?.candidatesTokenCount ??
+      usage?.outputTokenCount ??
+      0,
+  }
+}
+
+/**
+ * Extract text from a Gemini response chunk.
+ */
+function extractText(json: any): string {
+  const parts =
+    json?.candidates?.[0]?.content?.parts
+
+  if (!Array.isArray(parts)) {
+    return ''
+  }
+
+  return parts
+    .map((part: any) =>
+      typeof part?.text === 'string'
+        ? part.text
+        : ''
+    )
+    .join('')
+}
+
+/**
+ * Streaming Gemini chat.
+ *
+ * Keeps the old function name so /api/chat does not need
+ * to be rewritten.
+ */
 export async function* streamCerebrasChat(
   options: CerebrasStreamOptions
 ): AsyncGenerator<
   string,
-  { inputTokens: number; outputTokens: number },
+  {
+    inputTokens: number
+    outputTokens: number
+  },
   void
 > {
   const apiKey = getApiKey()
 
   const model =
-    options.model?.trim() || getCerebrasModel()
+    options.model?.trim() ||
+    getCerebrasModel()
 
-  const response = await fetch(
-    `${CEREBRAS_BASE_URL}/chat/completions`,
-    {
-      method: 'POST',
+  const converted =
+    convertMessages(options.messages)
 
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
+  const url =
+    `${GEMINI_BASE_URL}/models/${encodeURIComponent(model)}` +
+    `:streamGenerateContent?alt=sse`
+
+  const response = await fetch(url, {
+    method: 'POST',
+
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey,
+    },
+
+    body: JSON.stringify({
+      ...(converted.systemInstruction
+        ? {
+            systemInstruction:
+              converted.systemInstruction,
+          }
+        : {}),
+
+      contents: converted.contents,
+
+      generationConfig: {
+        temperature:
+          options.temperature ?? 0.7,
+
+        maxOutputTokens:
+          options.maxTokens ?? 2048,
       },
+    }),
 
-      body: JSON.stringify({
-        model,
-        messages: options.messages,
-        temperature: options.temperature ?? 0.7,
-        max_tokens: options.maxTokens ?? 2048,
-        stream: true,
-        stream_options: {
-          include_usage: true,
-        },
-      }),
-
-      signal: AbortSignal.timeout(60_000),
-    }
-  )
+    signal: AbortSignal.timeout(60_000),
+  })
 
   if (!response.ok) {
     const text = await response
       .text()
       .catch(() => '')
 
-    if (
-      response.status === 403 &&
-      text.includes('Cloudflare')
-    ) {
-      throw new CerebrasError(
-        'Cerebras API bị Cloudflare block từ IP này. Key hợp lệ nhưng sandbox không gọi được tới Cerebras. Deploy lên Vercel sẽ hoạt động bình thường.',
-        403
-      )
-    }
-
     throw new CerebrasError(
-      `Cerebras API error ${response.status}: ${text.slice(0, 300)}`,
+      `Gemini API error ${response.status}: ${text.slice(
+        0,
+        500
+      )}`,
       response.status
     )
   }
 
   if (!response.body) {
     throw new CerebrasError(
-      'No response body from Cerebras',
+      'No response body from Gemini',
       502
     )
   }
 
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
+  const reader =
+    response.body.getReader()
+
+  const decoder =
+    new TextDecoder()
 
   let buffer = ''
   let totalOutput = ''
@@ -127,7 +265,8 @@ export async function* streamCerebrasChat(
   let outputTokens = 0
 
   while (true) {
-    const { done, value } = await reader.read()
+    const { done, value } =
+      await reader.read()
 
     if (done) break
 
@@ -135,51 +274,57 @@ export async function* streamCerebrasChat(
       stream: true,
     })
 
-    const lines = buffer.split('\n')
+    const lines =
+      buffer.split('\n')
 
-    buffer = lines.pop() || ''
+    buffer =
+      lines.pop() || ''
 
     for (const line of lines) {
-      const trimmed = line.trim()
+      const trimmed =
+        line.trim()
 
-      if (
-        !trimmed ||
-        !trimmed.startsWith('data:')
-      ) {
+      if (!trimmed) {
         continue
       }
 
-      const data = trimmed
-        .slice(5)
-        .trim()
+      if (!trimmed.startsWith('data:')) {
+        continue
+      }
 
-      if (data === '[DONE]') {
+      const data =
+        trimmed
+          .slice(5)
+          .trim()
+
+      if (!data) {
         continue
       }
 
       try {
-        const json = JSON.parse(data)
+        const json =
+          JSON.parse(data)
 
-        const delta =
-          json.choices?.[0]?.delta?.content
+        const text =
+          extractText(json)
 
-        if (
-          typeof delta === 'string' &&
-          delta.length > 0
-        ) {
-          totalOutput += delta
+        if (text) {
+          totalOutput += text
 
-          yield delta
+          yield text
         }
 
-        if (json.usage) {
-          inputTokens =
-            json.usage.prompt_tokens ??
-            inputTokens
+        const usage =
+          readUsage(json)
 
+        if (usage.inputTokens > 0) {
+          inputTokens =
+            usage.inputTokens
+        }
+
+        if (usage.outputTokens > 0) {
           outputTokens =
-            json.usage.completion_tokens ??
-            outputTokens
+            usage.outputTokens
         }
       } catch {
         // Ignore malformed SSE chunks.
@@ -188,17 +333,20 @@ export async function* streamCerebrasChat(
   }
 
   if (inputTokens === 0) {
-    inputTokens = estimateTokens(
-      options.messages
-        .map((message) => message.content)
-        .join('\n')
-    )
+    inputTokens =
+      estimateTokens(
+        options.messages
+          .map(
+            (message) =>
+              message.content
+          )
+          .join('\n')
+      )
   }
 
   if (outputTokens === 0) {
-    outputTokens = estimateTokens(
-      totalOutput
-    )
+    outputTokens =
+      estimateTokens(totalOutput)
   }
 
   return {
@@ -207,6 +355,9 @@ export async function* streamCerebrasChat(
   }
 }
 
+/**
+ * Estimate tokens when the provider doesn't return usage.
+ */
 export function estimateTokens(
   text: string
 ): number {
@@ -216,6 +367,12 @@ export function estimateTokens(
   )
 }
 
+/**
+ * Non-streaming Gemini chat.
+ *
+ * Keeps the old function name so existing imports
+ * continue to work.
+ */
 export async function completeCerebrasChat(
   options: CerebrasStreamOptions
 ): Promise<{
@@ -226,69 +383,85 @@ export async function completeCerebrasChat(
   const apiKey = getApiKey()
 
   const model =
-    options.model?.trim() || getCerebrasModel()
+    options.model?.trim() ||
+    getCerebrasModel()
 
-  const response = await fetch(
-    `${CEREBRAS_BASE_URL}/chat/completions`,
-    {
-      method: 'POST',
+  const converted =
+    convertMessages(options.messages)
 
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
+  const url =
+    `${GEMINI_BASE_URL}/models/${encodeURIComponent(model)}` +
+    ':generateContent'
+
+  const response = await fetch(url, {
+    method: 'POST',
+
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey,
+    },
+
+    body: JSON.stringify({
+      ...(converted.systemInstruction
+        ? {
+            systemInstruction:
+              converted.systemInstruction,
+          }
+        : {}),
+
+      contents: converted.contents,
+
+      generationConfig: {
+        temperature:
+          options.temperature ?? 0.7,
+
+        maxOutputTokens:
+          options.maxTokens ?? 1024,
       },
+    }),
 
-      body: JSON.stringify({
-        model,
-        messages: options.messages,
-        temperature: options.temperature ?? 0.7,
-        max_tokens: options.maxTokens ?? 1024,
-        stream: false,
-      }),
-
-      signal: AbortSignal.timeout(30_000),
-    }
-  )
+    signal: AbortSignal.timeout(30_000),
+  })
 
   if (!response.ok) {
     const text = await response
       .text()
       .catch(() => '')
 
-    if (
-      response.status === 403 &&
-      text.includes('Cloudflare')
-    ) {
-      throw new CerebrasError(
-        'Cerebras API bị Cloudflare block từ sandbox. Deploy lên Vercel sẽ hoạt động.',
-        403
-      )
-    }
-
     throw new CerebrasError(
-      `Cerebras API error ${response.status}: ${text.slice(0, 300)}`,
+      `Gemini API error ${response.status}: ${text.slice(
+        0,
+        500
+      )}`,
       response.status
     )
   }
 
-  const json = await response.json()
+  const json =
+    await response.json()
 
   const content =
-    json.choices?.[0]?.message?.content ?? ''
+    extractText(json)
+
+  const usage =
+    readUsage(json)
 
   return {
     content,
 
     inputTokens:
-      json.usage?.prompt_tokens ??
+      usage.inputTokens ||
       estimateTokens(
         options.messages
-          .map((message) => message.content)
+          .map(
+            (message) =>
+              message.content
+          )
           .join('\n')
       ),
 
     outputTokens:
-      json.usage?.completion_tokens ??
+      usage.outputTokens ||
       estimateTokens(content),
   }
-          }
+}
